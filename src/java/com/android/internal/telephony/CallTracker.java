@@ -16,12 +16,14 @@
 
 package com.android.internal.telephony;
 
+import android.content.Context;
 import android.os.AsyncResult;
 import android.os.Handler;
 import android.os.Message;
+import android.os.PersistableBundle;
 import android.os.SystemProperties;
+import android.telephony.CarrierConfigManager;
 import android.text.TextUtils;
-import com.android.internal.telephony.CommandException;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -187,7 +189,10 @@ public abstract class CallTracker extends Handler {
             if (values.length == 2) {
                 if (values[0].equals(
                         android.telephony.PhoneNumberUtils.stripSeparators(dialString))) {
-                    mCi.testingEmergencyCall();
+                    // mCi will be null for ImsPhoneCallTracker.
+                    if (mCi != null) {
+                        mCi.testingEmergencyCall();
+                    }
                     log("checkForTestEmergencyNumber: remap " +
                             dialString + " to " + values[1]);
                     dialString = values[1];
@@ -197,12 +202,24 @@ public abstract class CallTracker extends Handler {
         return dialString;
     }
 
-    protected String convertNumberIfNecessary(PhoneBase phoneBase, String dialNumber) {
+    protected String convertNumberIfNecessary(Phone phone, String dialNumber) {
         if (dialNumber == null) {
             return dialNumber;
         }
-        String[] convertMaps = phoneBase.getContext().getResources().getStringArray(
-                com.android.internal.R.array.dial_string_replace);
+        String[] convertMaps = null;
+        CarrierConfigManager configManager = (CarrierConfigManager)
+                phone.getContext().getSystemService(Context.CARRIER_CONFIG_SERVICE);
+        PersistableBundle bundle = configManager.getConfig();
+        if (bundle != null) {
+            convertMaps =
+                    bundle.getStringArray(CarrierConfigManager.KEY_DIAL_STRING_REPLACE_STRING_ARRAY);
+        }
+        if (convertMaps == null) {
+            // By default no replacement is necessary
+            log("convertNumberIfNecessary convertMaps is null");
+            return dialNumber;
+        }
+
         log("convertNumberIfNecessary Roaming"
             + " convertMaps.length " + convertMaps.length
             + " dialNumber.length() " + dialNumber.length());
@@ -212,39 +229,30 @@ public abstract class CallTracker extends Handler {
         }
 
         String[] entry;
-        String[] tmpArray;
         String outNumber = "";
-        boolean needConvert = false;
         for(String convertMap : convertMaps) {
             log("convertNumberIfNecessary: " + convertMap);
+            // entry format is  "dialStringToReplace:dialStringReplacement"
             entry = convertMap.split(":");
-            if (entry.length > 1) {
-                tmpArray = entry[1].split(",");
-                if (!TextUtils.isEmpty(entry[0]) && dialNumber.equals(entry[0])) {
-                    if (tmpArray.length >= 2 && !TextUtils.isEmpty(tmpArray[1])) {
-                        if (compareGid1(phoneBase, tmpArray[1])) {
-                            needConvert = true;
-                        }
-                    } else if (outNumber.isEmpty()) {
-                        needConvert = true;
-                    }
-
-                    if (needConvert) {
-                        if(!TextUtils.isEmpty(tmpArray[0]) && tmpArray[0].endsWith("MDN")) {
-                            String mdn = phoneBase.getLine1Number();
-                            if (!TextUtils.isEmpty(mdn) ) {
-                                if (mdn.startsWith("+")) {
-                                    outNumber = mdn;
-                                } else {
-                                    outNumber = tmpArray[0].substring(0, tmpArray[0].length() -3)
-                                            + mdn;
-                                }
+            if (entry != null && entry.length > 1) {
+                String dsToReplace = entry[0];
+                String dsReplacement = entry[1];
+                if (!TextUtils.isEmpty(dsToReplace) && dialNumber.equals(dsToReplace)) {
+                    // Needs to be converted
+                    if (!TextUtils.isEmpty(dsReplacement) && dsReplacement.endsWith("MDN")) {
+                        String mdn = phone.getLine1Number();
+                        if (!TextUtils.isEmpty(mdn)) {
+                            if (mdn.startsWith("+")) {
+                                outNumber = mdn;
+                            } else {
+                                outNumber = dsReplacement.substring(0, dsReplacement.length() -3)
+                                        + mdn;
                             }
-                        } else {
-                            outNumber = tmpArray[0];
                         }
-                        needConvert = false;
+                    } else {
+                        outNumber = dsReplacement;
                     }
+                    break;
                 }
             }
         }
@@ -259,8 +267,8 @@ public abstract class CallTracker extends Handler {
 
     }
 
-    private boolean compareGid1(PhoneBase phoneBase, String serviceGid1) {
-        String gid1 = phoneBase.getGroupIdLevel1();
+    private boolean compareGid1(Phone phone, String serviceGid1) {
+        String gid1 = phone.getGroupIdLevel1();
         int gid_length = serviceGid1.length();
         boolean ret = true;
 
@@ -287,6 +295,14 @@ public abstract class CallTracker extends Handler {
     public abstract void unregisterForVoiceCallEnded(Handler h);
     public abstract PhoneConstants.State getState();
     protected abstract void log(String msg);
+
+    /**
+     * Called when the call tracker should attempt to reconcile its calls against its underlying
+     * phone implementation and cleanup any stale calls.
+     */
+    public void cleanupCalls() {
+        // no base implementation
+    }
 
     public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
         pw.println("CallTracker:");

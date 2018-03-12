@@ -138,8 +138,20 @@ public class AdnRecord implements Parcelable {
         return mAlphaTag;
     }
 
+    public int getEfid() {
+        return mEfid;
+    }
+
+    public int getRecId() {
+        return mRecordNumber;
+    }
+
     public String getNumber() {
         return mNumber;
+    }
+
+    public void setNumber(String number) {
+        mNumber = number;
     }
 
     public String[] getEmails() {
@@ -152,7 +164,8 @@ public class AdnRecord implements Parcelable {
 
     @Override
     public String toString() {
-        return "ADN Record '" + mAlphaTag + "' '" + mNumber + " " + mEmails + "'";
+        return "ADN Record '" + mAlphaTag + "' '" + Rlog.pii(LOG_TAG, mNumber) + " "
+                + Rlog.pii(LOG_TAG, mEmails) + "'";
     }
 
     public boolean isEmpty() {
@@ -226,9 +239,13 @@ public class AdnRecord implements Parcelable {
             Rlog.w(LOG_TAG,
                     "[buildAdnString] Max length of dialing number is 20");
             return null;
-        } else if (mAlphaTag != null && mAlphaTag.length() > footerOffset) {
-            Rlog.w(LOG_TAG,
-                    "[buildAdnString] Max length of tag is " + footerOffset);
+        }
+
+        byteTag = !TextUtils.isEmpty(mAlphaTag) ? GsmAlphabet.stringToGsm8BitPacked(mAlphaTag)
+                : new byte[0];
+
+        if (byteTag.length > footerOffset) {
+            Rlog.w(LOG_TAG, "[buildAdnString] Max length of tag is " + footerOffset);
             return null;
         } else {
             bcdNumber = PhoneNumberUtils.numberToCalledPartyBCD(mNumber);
@@ -243,8 +260,7 @@ public class AdnRecord implements Parcelable {
             adnString[footerOffset + ADN_EXTENSION_ID]
                     = (byte) 0xFF; // Extension Record Id
 
-            if (!TextUtils.isEmpty(mAlphaTag)) {
-                byteTag = GsmAlphabet.stringToGsm8BitPacked(mAlphaTag);
+            if (byteTag.length > 0) {
                 System.arraycopy(byteTag, 0, adnString, 0, byteTag.length);
             }
 

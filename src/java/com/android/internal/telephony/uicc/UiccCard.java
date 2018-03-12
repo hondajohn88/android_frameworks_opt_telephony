@@ -16,18 +16,19 @@
 
 package com.android.internal.telephony.uicc;
 
-import static android.Manifest.permission.READ_PHONE_STATE;
-import android.app.ActivityManagerNative;
 import android.app.AlertDialog;
+import android.app.usage.UsageStatsManager;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.content.res.Resources;
+import android.net.Uri;
 import android.os.AsyncResult;
 import android.os.Binder;
 import android.os.Handler;
@@ -36,31 +37,26 @@ import android.os.PowerManager;
 import android.os.Registrant;
 import android.os.RegistrantList;
 import android.preference.PreferenceManager;
+import android.provider.Settings;
 import android.telephony.Rlog;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.LocalLog;
 import android.view.WindowManager;
 
+import com.android.internal.R;
 import com.android.internal.telephony.CommandsInterface;
-import com.android.internal.telephony.PhoneBase;
 import com.android.internal.telephony.CommandsInterface.RadioState;
-import com.android.internal.telephony.IccCardConstants.State;
-import com.android.internal.telephony.gsm.GSMPhone;
+import com.android.internal.telephony.RIL;
+import com.android.internal.telephony.cat.CatService;
 import com.android.internal.telephony.uicc.IccCardApplicationStatus.AppType;
 import com.android.internal.telephony.uicc.IccCardStatus.CardState;
 import com.android.internal.telephony.uicc.IccCardStatus.PinState;
-import com.android.internal.telephony.cat.CatService;
-import com.android.internal.telephony.cdma.CDMALTEPhone;
-import com.android.internal.telephony.cdma.CDMAPhone;
-import com.android.internal.telephony.cdma.CdmaSubscriptionSourceManager;
-
-import android.os.SystemProperties;
-
-import com.android.internal.R;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 
 /**
@@ -88,6 +84,7 @@ public class UiccCard {
     private CatService mCatService;
     private RadioState mLastRadioState =  RadioState.RADIO_UNAVAILABLE;
     private UiccCarrierPrivilegeRules mCarrierPrivilegeRules;
+    private boolean mDefaultAppsActivated;
 
     private RegistrantList mAbsentRegistrants = new RegistrantList();
     private RegistrantList mCarrierPrivilegeRegistrants = new RegistrantList();
@@ -99,25 +96,17 @@ public class UiccCard {
     private static final int EVENT_TRANSMIT_APDU_LOGICAL_CHANNEL_DONE = 17;
     private static final int EVENT_TRANSMIT_APDU_BASIC_CHANNEL_DONE = 18;
     private static final int EVENT_SIM_IO_DONE = 19;
-    private static final int EVENT_CARRIER_PRIVILIGES_LOADED = 20;
+    private static final int EVENT_CARRIER_PRIVILEGES_LOADED = 20;
 
     private static final LocalLog mLocalLog = new LocalLog(100);
 
-    private int mPhoneId;
-
-    public UiccCard(Context c, CommandsInterface ci, IccCardStatus ics) {
-        if (DBG) log("Creating");
-        mCardState = ics.mCardState;
-        update(c, ci, ics);
-    }
+    private final int mPhoneId;
 
     public UiccCard(Context c, CommandsInterface ci, IccCardStatus ics, int phoneId) {
+        if (DBG) log("Creating");
         mCardState = ics.mCardState;
         mPhoneId = phoneId;
         update(c, ci, ics);
-    }
-
-    protected UiccCard() {
     }
 
     public void dispose() {
@@ -165,18 +154,19 @@ public class UiccCard {
                 }
             }
 
-            createAndUpdateCatService();
+            createAndUpdateCatServiceLocked();
 
             // Reload the carrier privilege rules if necessary.
             log("Before privilege rules: " + mCarrierPrivilegeRules + " : " + mCardState);
             if (mCarrierPrivilegeRules == null && mCardState == CardState.CARDSTATE_PRESENT) {
                 mCarrierPrivilegeRules = new UiccCarrierPrivilegeRules(this,
-                        mHandler.obtainMessage(EVENT_CARRIER_PRIVILIGES_LOADED));
-            } else if (mCarrierPrivilegeRules != null && mCardState != CardState.CARDSTATE_PRESENT) {
+                        mHandler.obtainMessage(EVENT_CARRIER_PRIVILEGES_LOADED));
+            } else if (mCarrierPrivilegeRules != null
+                    && mCardState != CardState.CARDSTATE_PRESENT) {
                 mCarrierPrivilegeRules = null;
             }
 
-            sanitizeApplicationIndexes();
+            sanitizeApplicationIndexesLocked();
 
             RadioState radioState = mCi.getRadioState();
             if (DBG) log("update: radioState=" + radioState + " mLastRadioState="
@@ -194,17 +184,37 @@ public class UiccCard {
                     mHandler.sendMessage(mHandler.obtainMessage(EVENT_CARD_ADDED, null));
                 }
             }
+            if (needsSimActivation()) {
+                if (mCardState == CardState.CARDSTATE_PRESENT) {
+                    if (!mDefaultAppsActivated) {
+                        activateDefaultApps();
+                        mDefaultAppsActivated = true;
+                    }
+                } else {
+                    // SIM removed, reset activation flag to make sure
+                    // to re-run the activation at the next insertion
+                    mDefaultAppsActivated = false;
+                }
+            }
+
             mLastRadioState = radioState;
         }
     }
 
-    protected void createAndUpdateCatService() {
+    private boolean needsSimActivation() {
+        if (mCi instanceof RIL) {
+            return ((RIL) mCi).needsOldRilFeature("simactivation");
+        }
+        return false;
+    }
+
+    private void createAndUpdateCatServiceLocked() {
         if (mUiccApplications.length > 0 && mUiccApplications[0] != null) {
             // Initialize or Reinitialize CatService
             if (mCatService == null) {
                 mCatService = CatService.getInstance(mCi, mContext, this, mPhoneId);
             } else {
-                ((CatService)mCatService).update(mCi, mContext, this);
+                mCatService.update(mCi, mContext, this);
             }
         } else {
             if (mCatService != null) {
@@ -212,10 +222,6 @@ public class UiccCard {
             }
             mCatService = null;
         }
-    }
-
-    public CatService getCatService() {
-        return mCatService;
     }
 
     @Override
@@ -228,16 +234,18 @@ public class UiccCard {
      * and resets invalid indexes. (This should never happen, but in case
      * RIL misbehaves we need to manage situation gracefully)
      */
-    private void sanitizeApplicationIndexes() {
+    private void sanitizeApplicationIndexesLocked() {
         mGsmUmtsSubscriptionAppIndex =
-                checkIndex(mGsmUmtsSubscriptionAppIndex, AppType.APPTYPE_SIM, AppType.APPTYPE_USIM);
+                checkIndexLocked(
+                        mGsmUmtsSubscriptionAppIndex, AppType.APPTYPE_SIM, AppType.APPTYPE_USIM);
         mCdmaSubscriptionAppIndex =
-                checkIndex(mCdmaSubscriptionAppIndex, AppType.APPTYPE_RUIM, AppType.APPTYPE_CSIM);
+                checkIndexLocked(
+                        mCdmaSubscriptionAppIndex, AppType.APPTYPE_RUIM, AppType.APPTYPE_CSIM);
         mImsSubscriptionAppIndex =
-                checkIndex(mImsSubscriptionAppIndex, AppType.APPTYPE_ISIM, null);
+                checkIndexLocked(mImsSubscriptionAppIndex, AppType.APPTYPE_ISIM, null);
     }
 
-    private int checkIndex(int index, AppType expectedAppType, AppType altExpectedAppType) {
+    private int checkIndexLocked(int index, AppType expectedAppType, AppType altExpectedAppType) {
         if (mUiccApplications == null || index >= mUiccApplications.length) {
             loge("App index " + index + " is invalid since there are no applications");
             return -1;
@@ -257,6 +265,34 @@ public class UiccCard {
 
         // Seems to be valid
         return index;
+    }
+
+    private void activateDefaultApps() {
+        int gsmIndex = mGsmUmtsSubscriptionAppIndex;
+        int cdmaIndex = mCdmaSubscriptionAppIndex;
+
+        if (gsmIndex < 0 || cdmaIndex < 0) {
+            for (int i = 0; i < mUiccApplications.length; i++) {
+                if (mUiccApplications[i] == null) {
+                    continue;
+                }
+
+                AppType appType = mUiccApplications[i].getType();
+                if (gsmIndex < 0 &&
+                        (appType == AppType.APPTYPE_USIM || appType == AppType.APPTYPE_SIM)) {
+                    gsmIndex = i;
+                } else if (cdmaIndex < 0 &&
+                        (appType == AppType.APPTYPE_CSIM || appType == AppType.APPTYPE_RUIM)) {
+                    cdmaIndex = i;
+                }
+            }
+        }
+        if (gsmIndex >= 0) {
+            mCi.setUiccSubscription(gsmIndex, true, null);
+        }
+        if (cdmaIndex >= 0) {
+            mCi.setUiccSubscription(cdmaIndex, true, null);
+        }
     }
 
     /**
@@ -398,7 +434,7 @@ public class UiccCard {
                     AsyncResult.forMessage((Message)ar.userObj, ar.result, ar.exception);
                     ((Message)ar.userObj).sendToTarget();
                     break;
-                case EVENT_CARRIER_PRIVILIGES_LOADED:
+                case EVENT_CARRIER_PRIVILEGES_LOADED:
                     onCarrierPriviligesLoadedMessage();
                     break;
                 default:
@@ -407,9 +443,81 @@ public class UiccCard {
         }
     };
 
+    private boolean isPackageInstalled(String pkgName) {
+        PackageManager pm = mContext.getPackageManager();
+        try {
+            pm.getPackageInfo(pkgName, PackageManager.GET_ACTIVITIES);
+            if (DBG) log(pkgName + " is installed.");
+            return true;
+        } catch (PackageManager.NameNotFoundException e) {
+            if (DBG) log(pkgName + " is not installed.");
+            return false;
+        }
+    }
+
+    private class ClickListener implements DialogInterface.OnClickListener {
+        String pkgName;
+        public ClickListener(String pkgName) {
+            this.pkgName = pkgName;
+        }
+        @Override
+        public void onClick(DialogInterface dialog, int which) {
+            synchronized (mLock) {
+                if (which == DialogInterface.BUTTON_POSITIVE) {
+                    Intent market = new Intent(Intent.ACTION_VIEW);
+                    market.setData(Uri.parse("market://details?id=" + pkgName));
+                    market.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    mContext.startActivity(market);
+                } else if (which == DialogInterface.BUTTON_NEGATIVE) {
+                    if (DBG) log("Not now clicked for carrier app dialog.");
+                }
+            }
+        }
+    }
+
+    private void promptInstallCarrierApp(String pkgName) {
+        DialogInterface.OnClickListener listener = new ClickListener(pkgName);
+
+        Resources r = Resources.getSystem();
+        String message = r.getString(R.string.carrier_app_dialog_message);
+        String buttonTxt = r.getString(R.string.carrier_app_dialog_button);
+        String notNowTxt = r.getString(R.string.carrier_app_dialog_not_now);
+
+        AlertDialog dialog = new AlertDialog.Builder(mContext)
+        .setMessage(message)
+        .setNegativeButton(notNowTxt, listener)
+        .setPositiveButton(buttonTxt, listener)
+        .create();
+        dialog.getWindow().setType(WindowManager.LayoutParams.TYPE_SYSTEM_ALERT);
+        dialog.show();
+    }
+
     private void onCarrierPriviligesLoadedMessage() {
+        UsageStatsManager usm = (UsageStatsManager) mContext.getSystemService(
+                Context.USAGE_STATS_SERVICE);
+        if (usm != null) {
+            usm.onCarrierPrivilegedAppsChanged();
+        }
         synchronized (mLock) {
             mCarrierPrivilegeRegistrants.notifyRegistrants();
+            String whitelistSetting = Settings.Global.getString(mContext.getContentResolver(),
+                    Settings.Global.CARRIER_APP_WHITELIST);
+            if (TextUtils.isEmpty(whitelistSetting)) {
+                return;
+            }
+            HashSet<String> carrierAppSet = new HashSet<String>(
+                    Arrays.asList(whitelistSetting.split("\\s*;\\s*")));
+            if (carrierAppSet.isEmpty()) {
+                return;
+            }
+
+            List<String> pkgNames = mCarrierPrivilegeRules.getPackageNames();
+            for (String pkgName : pkgNames) {
+                if (!TextUtils.isEmpty(pkgName) && carrierAppSet.contains(pkgName)
+                        && !isPackageInstalled(pkgName)) {
+                    promptInstallCarrierApp(pkgName);
+                }
+            }
         }
     }
 
@@ -493,32 +601,41 @@ public class UiccCard {
         synchronized (mLock) {
             boolean changed = false;
             for (int i = 0; i < mUiccApplications.length; i++) {
-                if (mUiccApplications[i] != null &&
-                    (aid == null || aid.equals(mUiccApplications[i].getAid()))) {
+                if (mUiccApplications[i] != null
+                        && (TextUtils.isEmpty(aid) || aid.equals(mUiccApplications[i].getAid()))) {
                     // Delete removed applications
                     mUiccApplications[i].dispose();
                     mUiccApplications[i] = null;
                     changed = true;
                 }
             }
+            if (TextUtils.isEmpty(aid)) {
+                if (mCarrierPrivilegeRules != null) {
+                    mCarrierPrivilegeRules = null;
+                    changed = true;
+                }
+                if (mCatService != null) {
+                    mCatService.dispose();
+                    mCatService = null;
+                    changed = true;
+                }
+            }
             return changed;
         }
-        // TODO: For a card level notification, we should delete the CarrierPrivilegeRules and the
-        // CAT service.
     }
 
     /**
-     * Exposes {@link CommandsInterface.iccOpenLogicalChannel}
+     * Exposes {@link CommandsInterface#iccOpenLogicalChannel}
      */
-    public void iccOpenLogicalChannel(String AID, Message response) {
-        loglocal("Open Logical Channel: " + AID + " by pid:" + Binder.getCallingPid()
+    public void iccOpenLogicalChannel(String AID, int p2, Message response) {
+        loglocal("Open Logical Channel: " + AID + " , " + p2 + " by pid:" + Binder.getCallingPid()
                 + " uid:" + Binder.getCallingUid());
-        mCi.iccOpenLogicalChannel(AID,
+        mCi.iccOpenLogicalChannel(AID, p2,
                 mHandler.obtainMessage(EVENT_OPEN_LOGICAL_CHANNEL_DONE, response));
     }
 
     /**
-     * Exposes {@link CommandsInterface.iccCloseLogicalChannel}
+     * Exposes {@link CommandsInterface#iccCloseLogicalChannel}
      */
     public void iccCloseLogicalChannel(int channel, Message response) {
         loglocal("Close Logical Channel: " + channel);
@@ -527,7 +644,7 @@ public class UiccCard {
     }
 
     /**
-     * Exposes {@link CommandsInterface.iccTransmitApduLogicalChannel}
+     * Exposes {@link CommandsInterface#iccTransmitApduLogicalChannel}
      */
     public void iccTransmitApduLogicalChannel(int channel, int cla, int command,
             int p1, int p2, int p3, String data, Message response) {
@@ -536,7 +653,7 @@ public class UiccCard {
     }
 
     /**
-     * Exposes {@link CommandsInterface.iccTransmitApduBasicChannel}
+     * Exposes {@link CommandsInterface#iccTransmitApduBasicChannel}
      */
     public void iccTransmitApduBasicChannel(int cla, int command,
             int p1, int p2, int p3, String data, Message response) {
@@ -545,7 +662,7 @@ public class UiccCard {
     }
 
     /**
-     * Exposes {@link CommandsInterface.iccIO}
+     * Exposes {@link CommandsInterface#iccIO}
      */
     public void iccExchangeSimIO(int fileID, int command, int p1, int p2, int p3,
             String pathID, Message response) {
@@ -554,7 +671,7 @@ public class UiccCard {
     }
 
     /**
-     * Exposes {@link CommandsInterface.sendEnvelopeWithStatus}
+     * Exposes {@link CommandsInterface#sendEnvelopeWithStatus}
      */
     public void sendEnvelopeWithStatus(String contents, Message response) {
         mCi.sendEnvelopeWithStatus(contents, response);
@@ -576,48 +693,79 @@ public class UiccCard {
     }
 
     /**
-     * Returns true iff carrier priveleges rules are null (dont need to be loaded) or loaded.
+     * Returns true iff carrier privileges rules are null (dont need to be loaded) or loaded.
      */
     public boolean areCarrierPriviligeRulesLoaded() {
-        return mCarrierPrivilegeRules == null
-            || mCarrierPrivilegeRules.areCarrierPriviligeRulesLoaded();
+        UiccCarrierPrivilegeRules carrierPrivilegeRules = getCarrierPrivilegeRules();
+        return carrierPrivilegeRules == null
+                || carrierPrivilegeRules.areCarrierPriviligeRulesLoaded();
     }
 
     /**
-     * Exposes {@link UiccCarrierPrivilegeRules.getCarrierPrivilegeStatus}.
+     * Returns true if there are some carrier privilege rules loaded and specified.
+     */
+    public boolean hasCarrierPrivilegeRules() {
+        UiccCarrierPrivilegeRules carrierPrivilegeRules = getCarrierPrivilegeRules();
+        return carrierPrivilegeRules != null && carrierPrivilegeRules.hasCarrierPrivilegeRules();
+    }
+
+    /**
+     * Exposes {@link UiccCarrierPrivilegeRules#getCarrierPrivilegeStatus}.
      */
     public int getCarrierPrivilegeStatus(Signature signature, String packageName) {
-        return mCarrierPrivilegeRules == null ?
-            TelephonyManager.CARRIER_PRIVILEGE_STATUS_RULES_NOT_LOADED :
-            mCarrierPrivilegeRules.getCarrierPrivilegeStatus(signature, packageName);
+        UiccCarrierPrivilegeRules carrierPrivilegeRules = getCarrierPrivilegeRules();
+        return carrierPrivilegeRules == null
+                ? TelephonyManager.CARRIER_PRIVILEGE_STATUS_RULES_NOT_LOADED :
+                carrierPrivilegeRules.getCarrierPrivilegeStatus(signature, packageName);
     }
 
     /**
-     * Exposes {@link UiccCarrierPrivilegeRules.getCarrierPrivilegeStatus}.
+     * Exposes {@link UiccCarrierPrivilegeRules#getCarrierPrivilegeStatus}.
      */
     public int getCarrierPrivilegeStatus(PackageManager packageManager, String packageName) {
-        return mCarrierPrivilegeRules == null ?
-            TelephonyManager.CARRIER_PRIVILEGE_STATUS_RULES_NOT_LOADED :
-            mCarrierPrivilegeRules.getCarrierPrivilegeStatus(packageManager, packageName);
+        UiccCarrierPrivilegeRules carrierPrivilegeRules = getCarrierPrivilegeRules();
+        return carrierPrivilegeRules == null
+                ? TelephonyManager.CARRIER_PRIVILEGE_STATUS_RULES_NOT_LOADED :
+                carrierPrivilegeRules.getCarrierPrivilegeStatus(packageManager, packageName);
     }
 
     /**
-     * Exposes {@link UiccCarrierPrivilegeRules.getCarrierPrivilegeStatusForCurrentTransaction}.
+     * Exposes {@link UiccCarrierPrivilegeRules#getCarrierPrivilegeStatus}.
+     */
+    public int getCarrierPrivilegeStatus(PackageInfo packageInfo) {
+        UiccCarrierPrivilegeRules carrierPrivilegeRules = getCarrierPrivilegeRules();
+        return carrierPrivilegeRules == null
+                ? TelephonyManager.CARRIER_PRIVILEGE_STATUS_RULES_NOT_LOADED :
+                carrierPrivilegeRules.getCarrierPrivilegeStatus(packageInfo);
+    }
+
+    /**
+     * Exposes {@link UiccCarrierPrivilegeRules#getCarrierPrivilegeStatusForCurrentTransaction}.
      */
     public int getCarrierPrivilegeStatusForCurrentTransaction(PackageManager packageManager) {
-        return mCarrierPrivilegeRules == null ?
-            TelephonyManager.CARRIER_PRIVILEGE_STATUS_RULES_NOT_LOADED :
-            mCarrierPrivilegeRules.getCarrierPrivilegeStatusForCurrentTransaction(packageManager);
+        UiccCarrierPrivilegeRules carrierPrivilegeRules = getCarrierPrivilegeRules();
+        return carrierPrivilegeRules == null
+                ? TelephonyManager.CARRIER_PRIVILEGE_STATUS_RULES_NOT_LOADED :
+                carrierPrivilegeRules.getCarrierPrivilegeStatusForCurrentTransaction(
+                        packageManager);
     }
 
     /**
-     * Exposes {@link UiccCarrierPrivilegeRules.getCarrierPackageNamesForIntent}.
+     * Exposes {@link UiccCarrierPrivilegeRules#getCarrierPackageNamesForIntent}.
      */
     public List<String> getCarrierPackageNamesForIntent(
             PackageManager packageManager, Intent intent) {
-        return mCarrierPrivilegeRules == null ? null :
-            mCarrierPrivilegeRules.getCarrierPackageNamesForIntent(
-                    packageManager, intent);
+        UiccCarrierPrivilegeRules carrierPrivilegeRules = getCarrierPrivilegeRules();
+        return carrierPrivilegeRules == null ? null :
+                carrierPrivilegeRules.getCarrierPackageNamesForIntent(
+                        packageManager, intent);
+    }
+
+    /** Returns a reference to the current {@link UiccCarrierPrivilegeRules}. */
+    private UiccCarrierPrivilegeRules getCarrierPrivilegeRules() {
+        synchronized (mLock) {
+            return mCarrierPrivilegeRules;
+        }
     }
 
     public boolean setOperatorBrandOverride(String brand) {

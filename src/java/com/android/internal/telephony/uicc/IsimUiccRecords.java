@@ -16,13 +16,18 @@
 
 package com.android.internal.telephony.uicc;
 
+import static com.android.internal.telephony.uicc.IccConstants.EF_DOMAIN;
+import static com.android.internal.telephony.uicc.IccConstants.EF_IMPI;
+import static com.android.internal.telephony.uicc.IccConstants.EF_IMPU;
+import static com.android.internal.telephony.uicc.IccConstants.EF_IST;
+import static com.android.internal.telephony.uicc.IccConstants.EF_PCSCF;
+
 import android.content.Context;
+import android.content.Intent;
 import android.os.AsyncResult;
-import android.os.Handler;
 import android.os.Message;
 import android.telephony.Rlog;
-import android.content.Intent;
-
+import android.text.TextUtils;
 
 import com.android.internal.telephony.CommandsInterface;
 import com.android.internal.telephony.gsm.SimTlv;
@@ -34,26 +39,21 @@ import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
 
-import static com.android.internal.telephony.uicc.IccConstants.EF_DOMAIN;
-import static com.android.internal.telephony.uicc.IccConstants.EF_IMPI;
-import static com.android.internal.telephony.uicc.IccConstants.EF_IMPU;
-import static com.android.internal.telephony.uicc.IccConstants.EF_IST;
-import static com.android.internal.telephony.uicc.IccConstants.EF_PCSCF;
-
 /**
  * {@hide}
  */
-public final class IsimUiccRecords extends IccRecords implements IsimRecords {
+public class IsimUiccRecords extends IccRecords implements IsimRecords {
     protected static final String LOG_TAG = "IsimUiccRecords";
 
     private static final boolean DBG = true;
+    private static final boolean VDBG = false; // STOPSHIP if true
     private static final boolean DUMP_RECORDS = false;  // Note: PII is logged when this is true
                                                         // STOPSHIP if true
     public static final String INTENT_ISIM_REFRESH = "com.android.intent.isim_refresh";
 
     private static final int EVENT_APP_READY = 1;
     private static final int EVENT_ISIM_REFRESH = 31;
-    private static final int EVENT_AKA_AUTHENTICATE_DONE          = 90;
+    private static final int EVENT_ISIM_AUTHENTICATE_DONE          = 91;
 
     // ISIM EF records (see 3GPP TS 31.103)
     private String mIsimImpi;               // IMS private user identity
@@ -130,9 +130,9 @@ public final class IsimUiccRecords extends IccRecords implements IsimRecords {
                     }
                     break;
 
-                case EVENT_AKA_AUTHENTICATE_DONE:
+                case EVENT_ISIM_AUTHENTICATE_DONE:
                     ar = (AsyncResult)msg.obj;
-                    log("EVENT_AKA_AUTHENTICATE_DONE");
+                    log("EVENT_ISIM_AUTHENTICATE_DONE");
                     if (ar.exception != null) {
                         log("Exception ISIM AKA: " + ar.exception);
                     } else {
@@ -277,7 +277,9 @@ public final class IsimUiccRecords extends IccRecords implements IsimRecords {
             }
         } while (tlv.nextObject());
 
-        Rlog.e(LOG_TAG, "[ISIM] can't find TLV tag in ISIM record, returning null");
+        if (VDBG) {
+            Rlog.d(LOG_TAG, "[ISIM] can't find TLV. record = " + IccUtils.bytesToHexString(record));
+        }
         return null;
     }
 
@@ -346,8 +348,8 @@ public final class IsimUiccRecords extends IccRecords implements IsimRecords {
             return;
         }
 
-        if (refreshResponse.aid != null &&
-                !refreshResponse.aid.equals(mParentApp.getAid())) {
+        if (!TextUtils.isEmpty(refreshResponse.aid)
+                && !refreshResponse.aid.equals(mParentApp.getAid())) {
             // This is for different app. Ignore.
             if (DBG) log("handleIsimRefresh received different app");
             return;
@@ -437,7 +439,7 @@ public final class IsimUiccRecords extends IccRecords implements IsimRecords {
         if (DBG) log("getIsimChallengeResponse-nonce:"+nonce);
         try {
             synchronized(mLock) {
-                mCi.requestIsimAuthentication(nonce,obtainMessage(EVENT_AKA_AUTHENTICATE_DONE));
+                mCi.requestIsimAuthentication(nonce,obtainMessage(EVENT_ISIM_AUTHENTICATE_DONE));
                 try {
                     mLock.wait();
                 } catch (InterruptedException e) {
