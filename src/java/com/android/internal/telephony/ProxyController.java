@@ -649,10 +649,6 @@ public class ProxyController {
         return modemUuid;
     }
 
-    private void logd(String string) {
-        Rlog.d(LOG_TAG, string);
-    }
-
     //VENDOR_EDIT flexmap for eu version
     /**@hide*/
     public boolean euSetRadioCapability(RadioAccessFamily[] rafs) {
@@ -735,20 +731,11 @@ public class ProxyController {
 
         return true;
     }
-
- /**@hide*/
-    public boolean isFlexMappingProcessing(){
-        synchronized (mSetRadioAccessFamilyStatus) {
-            for (int i = 0; i < mPhones.length; i++) {
-                if (mSetRadioAccessFamilyStatus[i] != SET_RC_STATUS_IDLE) {
-                    loge("isFlexMappingProcessing: Phone[" + i + "] is not idle mode.");
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
     //VENDOR_EDIT end
+
+    private void logd(String string) {
+        Rlog.d(LOG_TAG, string);
+    }
 
     private void loge(String string) {
         Rlog.e(LOG_TAG, string);
