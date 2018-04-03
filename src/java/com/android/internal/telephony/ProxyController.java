@@ -731,6 +731,19 @@ public class ProxyController {
 
         return true;
     }
+
+ /**@hide*/
+    public boolean isFlexMappingProcessing(){
+        synchronized (mSetRadioAccessFamilyStatus) {
+            for (int i = 0; i < mPhones.length; i++) {
+                if (mSetRadioAccessFamilyStatus[i] != SET_RC_STATUS_IDLE) {
+                    loge("isFlexMappingProcessing: Phone[" + i + "] is not idle mode.");
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
     //VENDOR_EDIT end
 
     private void logd(String string) {

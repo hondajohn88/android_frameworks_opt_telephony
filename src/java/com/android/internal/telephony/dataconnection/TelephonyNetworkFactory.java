@@ -56,7 +56,6 @@ public class TelephonyNetworkFactory extends NetworkFactory {
     private boolean mIsActive;
     private boolean mIsDefault;
     private int mSubscriptionId;
-    private Context mContext;
 
     private final static int TELEPHONY_NETWORK_SCORE = 50;
 
@@ -71,7 +70,6 @@ public class TelephonyNetworkFactory extends NetworkFactory {
             SubscriptionController subscriptionController, SubscriptionMonitor subscriptionMonitor,
             Looper looper, Context context, int phoneId, DcTracker dcTracker) {
         super(looper, context, "TelephonyNetworkFactory[" + phoneId + "]", null);
-        mContext = context;
         mInternalHandler = new InternalHandler(looper);
 
         setCapabilityFilter(makeNetworkFilter(subscriptionController, phoneId));
@@ -176,13 +174,15 @@ public class TelephonyNetworkFactory extends NetworkFactory {
     // apply or revoke requests if our active-ness changes
     private void onActivePhoneSwitch() {
         final boolean newIsActive = mPhoneSwitcher.isPhoneActive(mPhoneId);
-        mIsActive = newIsActive;
-        String logString = "onActivePhoneSwitch(" + mIsActive + ", " + mIsDefault + ")";
-        if (DBG) log(logString);
-        if (mIsDefault) {
-            applyRequests(mDefaultRequests, (mIsActive ? REQUEST : RELEASE), logString);
+        if (mIsActive != newIsActive) {
+            mIsActive = newIsActive;
+            String logString = "onActivePhoneSwitch(" + mIsActive + ", " + mIsDefault + ")";
+            if (DBG) log(logString);
+            if (mIsDefault) {
+                applyRequests(mDefaultRequests, (mIsActive ? REQUEST : RELEASE), logString);
+            }
+            applyRequests(mSpecificRequests, (mIsActive ? REQUEST : RELEASE), logString);
         }
-        applyRequests(mSpecificRequests, (mIsActive ? REQUEST : RELEASE), logString);
     }
 
     // watch for phone->subId changes, reapply new filter and let
@@ -207,12 +207,7 @@ public class TelephonyNetworkFactory extends NetworkFactory {
             String logString = "onDefaultChange(" + mIsActive + "," + mIsDefault + ")";
             if (DBG) log(logString);
             if (mIsActive == false) return;
-            if (!mIsDefault && mSubscriptionController.getActiveSubInfoCount(
-                    mContext.getOpPackageName()) > 1) {
-                applyRequests(mDefaultRequests, RELEASE, logString);
-            } else {
-                applyRequests(mDefaultRequests, (mIsDefault ? REQUEST : RELEASE), logString);
-            }
+            applyRequests(mDefaultRequests, (mIsDefault ? REQUEST : RELEASE), logString);
         }
     }
 
