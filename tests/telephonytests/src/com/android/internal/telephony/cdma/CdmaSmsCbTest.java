@@ -16,20 +16,24 @@
 
 package com.android.internal.telephony.cdma;
 
-import android.os.Parcel;
+import android.hardware.radio.V1_0.CdmaSmsMessage;
+import android.support.test.filters.FlakyTest;
+import android.telephony.Rlog;
 import android.telephony.SmsCbCmasInfo;
 import android.telephony.SmsCbMessage;
 import android.telephony.cdma.CdmaSmsCbProgramData;
 import android.test.AndroidTestCase;
-import android.telephony.Rlog;
+import android.test.suitebuilder.annotation.SmallTest;
 
 import com.android.internal.telephony.GsmAlphabet;
 import com.android.internal.telephony.cdma.sms.BearerData;
 import com.android.internal.telephony.cdma.sms.CdmaSmsAddress;
 import com.android.internal.telephony.cdma.sms.SmsEnvelope;
 import com.android.internal.telephony.cdma.sms.UserData;
-import com.android.internal.telephony.uicc.IccUtils;
 import com.android.internal.util.BitwiseOutputStream;
+
+import org.junit.Ignore;
+import org.junit.Test;
 
 import java.util.Arrays;
 import java.util.List;
@@ -53,23 +57,21 @@ public class CdmaSmsCbTest extends AndroidTestCase {
      * @param serviceCategory the CDMA service category
      * @return the initialized Parcel
      */
-    private static Parcel createBroadcastParcel(int serviceCategory) {
-        Parcel p = Parcel.obtain();
+    private static CdmaSmsMessage createBroadcastParcel(int serviceCategory) {
+        CdmaSmsMessage msg = new CdmaSmsMessage();
 
-        p.writeInt(SmsEnvelope.TELESERVICE_NOT_SET);
-        p.writeByte((byte) 1);  // non-zero for MESSAGE_TYPE_BROADCAST
-        p.writeInt(serviceCategory);
+        msg.teleserviceId = SmsEnvelope.TELESERVICE_NOT_SET;
+        msg.isServicePresent = true;
+        msg.serviceCategory = serviceCategory;
 
         // dummy address (RIL may generate a different dummy address for broadcasts)
-        p.writeInt(CdmaSmsAddress.DIGIT_MODE_4BIT_DTMF);            // sAddress.digit_mode
-        p.writeInt(CdmaSmsAddress.NUMBER_MODE_NOT_DATA_NETWORK);    // sAddress.number_mode
-        p.writeInt(CdmaSmsAddress.TON_UNKNOWN);                     // sAddress.number_type
-        p.writeInt(CdmaSmsAddress.NUMBERING_PLAN_ISDN_TELEPHONY);   // sAddress.number_plan
-        p.writeByte((byte) 0);      // sAddress.number_of_digits
-        p.writeInt((byte) 0);       // sSubAddress.subaddressType
-        p.writeByte((byte) 0);      // sSubAddress.odd
-        p.writeByte((byte) 0);      // sSubAddress.number_of_digits
-        return p;
+        msg.address.digitMode = CdmaSmsAddress.DIGIT_MODE_4BIT_DTMF;
+        msg.address.numberMode = CdmaSmsAddress.NUMBER_MODE_NOT_DATA_NETWORK;
+        msg.address.numberType = CdmaSmsAddress.TON_UNKNOWN;
+        msg.address.numberPlan = CdmaSmsAddress.NUMBERING_PLAN_ISDN_TELEPHONY;
+        msg.subAddress.subaddressType = 0;
+        msg.subAddress.odd = false;
+        return msg;
     }
 
     /**
@@ -109,18 +111,15 @@ public class CdmaSmsCbTest extends AndroidTestCase {
 
     /**
      * Write the bearer data array to the parcel, then return a new SmsMessage from the parcel.
-     * @param p the parcel containing the CDMA SMS headers
+     * @param msg CdmaSmsMessage containing the CDMA SMS headers
      * @param bearerData the bearer data byte array to append to the parcel
      * @return the new SmsMessage created from the parcel
      */
-    private static SmsMessage createMessageFromParcel(Parcel p, byte[] bearerData) {
-        p.writeInt(bearerData.length);
+    private static SmsMessage createMessageFromParcel(CdmaSmsMessage msg, byte[] bearerData) {
         for (byte b : bearerData) {
-            p.writeByte(b);
+            msg.bearerData.add(b);
         }
-        p.setDataPosition(0);   // reset position for reading
-        SmsMessage message = SmsMessage.newFromParcel(p);
-        p.recycle();
+        SmsMessage message = SmsMessageConverter.newCdmaSmsMessageFromRil(msg);
         return message;
     }
 
@@ -163,7 +162,7 @@ public class CdmaSmsCbTest extends AndroidTestCase {
 
         byte[] cmasUserData = cmasBos.toByteArray();
 
-        Parcel p = createBroadcastParcel(serviceCategory);
+        CdmaSmsMessage msg = createBroadcastParcel(serviceCategory);
         BitwiseOutputStream bos = createBearerDataStream(messageId, priority, language);
 
         bos.write(8, SUBPARAM_USER_DATA);
@@ -173,7 +172,7 @@ public class CdmaSmsCbTest extends AndroidTestCase {
         bos.writeByteArray(cmasUserData.length * 8, cmasUserData);
         bos.write(3, 0);    // pad to byte boundary
 
-        return createMessageFromParcel(p, bos.toByteArray());
+        return createMessageFromParcel(msg, bos.toByteArray());
     }
 
     /**
@@ -189,13 +188,13 @@ public class CdmaSmsCbTest extends AndroidTestCase {
      */
     private static SmsMessage createBroadcastSmsMessage(int serviceCategory, int messageId,
             int priority, int language, int encoding, String body) throws Exception {
-        Parcel p = createBroadcastParcel(serviceCategory);
+        CdmaSmsMessage msg = createBroadcastParcel(serviceCategory);
         BitwiseOutputStream bos = createBearerDataStream(messageId, priority, language);
 
         bos.write(8, SUBPARAM_USER_DATA);
         encodeBody(encoding, body, false, bos);
 
-        return createMessageFromParcel(p, bos.toByteArray());
+        return createMessageFromParcel(msg, bos.toByteArray());
     }
 
     /**
@@ -364,18 +363,22 @@ public class CdmaSmsCbTest extends AndroidTestCase {
         assertEquals(false, cbMessage.isCmasMessage());
     }
 
+    @Test @SmallTest
     public void testNonEmergencyBroadcast7bitAscii() throws Exception {
         doTestNonEmergencyBroadcast(UserData.ENCODING_7BIT_ASCII);
     }
 
+    @Test @SmallTest
     public void testNonEmergencyBroadcast7bitGsm() throws Exception {
         doTestNonEmergencyBroadcast(UserData.ENCODING_GSM_7BIT_ALPHABET);
     }
 
+    @Test @SmallTest
     public void testNonEmergencyBroadcast16bitUnicode() throws Exception {
         doTestNonEmergencyBroadcast(UserData.ENCODING_UNICODE_16);
     }
 
+    @Test @SmallTest
     public void testNonEmergencyBroadcastIs91Extended() throws Exception {
         // IS-91 doesn't support language or priority subparameters, max 14 chars text
         SmsMessage msg = createBroadcastSmsMessage(987, 654, -1, -1,
@@ -416,31 +419,37 @@ public class CdmaSmsCbTest extends AndroidTestCase {
         assertEquals(SmsCbCmasInfo.CMAS_CERTAINTY_UNKNOWN, cmasInfo.getCertainty());
     }
 
+    @Test @SmallTest
     public void testCmasPresidentialAlert() throws Exception {
         doTestCmasBroadcast(SmsEnvelope.SERVICE_CATEGORY_CMAS_PRESIDENTIAL_LEVEL_ALERT,
                 SmsCbCmasInfo.CMAS_CLASS_PRESIDENTIAL_LEVEL_ALERT, PRES_ALERT);
     }
 
+    @Test @SmallTest
     public void testCmasExtremeAlert() throws Exception {
         doTestCmasBroadcast(SmsEnvelope.SERVICE_CATEGORY_CMAS_EXTREME_THREAT,
                 SmsCbCmasInfo.CMAS_CLASS_EXTREME_THREAT, EXTREME_ALERT);
     }
 
+    @Test @SmallTest
     public void testCmasSevereAlert() throws Exception {
         doTestCmasBroadcast(SmsEnvelope.SERVICE_CATEGORY_CMAS_SEVERE_THREAT,
                 SmsCbCmasInfo.CMAS_CLASS_SEVERE_THREAT, SEVERE_ALERT);
     }
 
+    @Test @SmallTest
     public void testCmasAmberAlert() throws Exception {
         doTestCmasBroadcast(SmsEnvelope.SERVICE_CATEGORY_CMAS_CHILD_ABDUCTION_EMERGENCY,
                 SmsCbCmasInfo.CMAS_CLASS_CHILD_ABDUCTION_EMERGENCY, AMBER_ALERT);
     }
 
+    @Test @SmallTest
     public void testCmasTestMessage() throws Exception {
         doTestCmasBroadcast(SmsEnvelope.SERVICE_CATEGORY_CMAS_TEST_MESSAGE,
                 SmsCbCmasInfo.CMAS_CLASS_REQUIRED_MONTHLY_TEST, MONTHLY_TEST_ALERT);
     }
 
+    @Test @SmallTest
     public void testCmasExtremeAlertType1Elements() throws Exception {
         SmsMessage msg = createCmasSmsMessage(SmsEnvelope.SERVICE_CATEGORY_CMAS_EXTREME_THREAT,
                 5678, BearerData.PRIORITY_EMERGENCY, BearerData.LANGUAGE_ENGLISH,
@@ -469,10 +478,14 @@ public class CdmaSmsCbTest extends AndroidTestCase {
 
     // VZW requirement is to discard message with unsupported charset. Verify that we return null
     // for this unsupported character set.
+    @FlakyTest
+    @Ignore
+    @Test
+    @SmallTest
     public void testCmasUnsupportedCharSet() throws Exception {
         SmsMessage msg = createCmasSmsMessage(SmsEnvelope.SERVICE_CATEGORY_CMAS_EXTREME_THREAT,
                 12345, BearerData.PRIORITY_EMERGENCY, BearerData.LANGUAGE_ENGLISH,
-                UserData.ENCODING_GSM_DCS, EXTREME_ALERT, -1, -1, -1, -1, -1);
+                0x1F, EXTREME_ALERT, -1, -1, -1, -1, -1);
 
         SmsCbMessage cbMessage = msg.parseBroadcastSms();
         assertNull("expected null for unsupported charset", cbMessage);
@@ -480,6 +493,7 @@ public class CdmaSmsCbTest extends AndroidTestCase {
 
     // VZW requirement is to discard message with unsupported charset. Verify that we return null
     // for this unsupported character set.
+    @Test @SmallTest
     public void testCmasUnsupportedCharSet2() throws Exception {
         SmsMessage msg = createCmasSmsMessage(SmsEnvelope.SERVICE_CATEGORY_CMAS_EXTREME_THREAT,
                 67890, BearerData.PRIORITY_EMERGENCY, BearerData.LANGUAGE_ENGLISH,
@@ -491,6 +505,7 @@ public class CdmaSmsCbTest extends AndroidTestCase {
 
     // VZW requirement is to discard message without record type 0. The framework will decode it
     // and the app will discard it.
+    @Test @SmallTest
     public void testCmasNoRecordType0() throws Exception {
         SmsMessage msg = createCmasSmsMessage(
                 SmsEnvelope.SERVICE_CATEGORY_CMAS_PRESIDENTIAL_LEVEL_ALERT, 1234,
@@ -517,6 +532,7 @@ public class CdmaSmsCbTest extends AndroidTestCase {
     }
 
     // Make sure we don't throw an exception if we feed completely random data to BearerStream.
+    @Test @SmallTest
     public void testRandomBearerStreamData() {
         Random r = new Random(54321);
         for (int run = 0; run < 1000; run++) {
@@ -528,8 +544,8 @@ public class CdmaSmsCbTest extends AndroidTestCase {
             // Rlog.d("CdmaSmsCbTest", "trying random bearer data run " + run + " length " + len);
             try {
                 int category = 0x0ff0 + r.nextInt(32);  // half CMAS, half non-CMAS
-                Parcel p = createBroadcastParcel(category);
-                SmsMessage msg = createMessageFromParcel(p, data);
+                CdmaSmsMessage cdmaSmsMessage = createBroadcastParcel(category);
+                SmsMessage msg = createMessageFromParcel(cdmaSmsMessage, data);
                 SmsCbMessage cbMessage = msg.parseBroadcastSms();
                 // with random input, cbMessage will almost always be null (log when it isn't)
                 if (cbMessage != null) {
@@ -543,11 +559,12 @@ public class CdmaSmsCbTest extends AndroidTestCase {
     }
 
     // Make sure we don't throw an exception if we put random data in the UserData subparam.
+    @Test @SmallTest
     public void testRandomUserData() {
         Random r = new Random(94040);
         for (int run = 0; run < 1000; run++) {
             int category = 0x0ff0 + r.nextInt(32);  // half CMAS, half non-CMAS
-            Parcel p = createBroadcastParcel(category);
+            CdmaSmsMessage cdmaSmsMessage = createBroadcastParcel(category);
             int len = r.nextInt(140);
             // Rlog.d("CdmaSmsCbTest", "trying random user data run " + run + " length " + len);
 
@@ -562,7 +579,7 @@ public class CdmaSmsCbTest extends AndroidTestCase {
                     bos.write(8, r.nextInt(256));
                 }
 
-                SmsMessage msg = createMessageFromParcel(p, bos.toByteArray());
+                SmsMessage msg = createMessageFromParcel(cdmaSmsMessage, bos.toByteArray());
                 SmsCbMessage cbMessage = msg.parseBroadcastSms();
             } catch (Exception e) {
                 Rlog.d("CdmaSmsCbTest", "exception thrown", e);
@@ -576,31 +593,30 @@ public class CdmaSmsCbTest extends AndroidTestCase {
      * write the bearer data and then convert it to an SmsMessage.
      * @return the initialized Parcel
      */
-    private static Parcel createServiceCategoryProgramDataParcel() {
-        Parcel p = Parcel.obtain();
+    private static CdmaSmsMessage createServiceCategoryProgramDataParcel() {
+        CdmaSmsMessage msg = new CdmaSmsMessage();
 
-        p.writeInt(SmsEnvelope.TELESERVICE_SCPT);
-        p.writeByte((byte) 0);  // non-zero for MESSAGE_TYPE_BROADCAST
-        p.writeInt(0);
+        msg.teleserviceId = SmsEnvelope.TELESERVICE_SCPT;
+        msg.isServicePresent = false;
+        msg.serviceCategory = 0;
 
         // dummy address (RIL may generate a different dummy address for broadcasts)
-        p.writeInt(CdmaSmsAddress.DIGIT_MODE_4BIT_DTMF);            // sAddress.digit_mode
-        p.writeInt(CdmaSmsAddress.NUMBER_MODE_NOT_DATA_NETWORK);    // sAddress.number_mode
-        p.writeInt(CdmaSmsAddress.TON_UNKNOWN);                     // sAddress.number_type
-        p.writeInt(CdmaSmsAddress.NUMBERING_PLAN_ISDN_TELEPHONY);   // sAddress.number_plan
-        p.writeByte((byte) 0);      // sAddress.number_of_digits
-        p.writeInt((byte) 0);       // sSubAddress.subaddressType
-        p.writeByte((byte) 0);      // sSubAddress.odd
-        p.writeByte((byte) 0);      // sSubAddress.number_of_digits
-        return p;
+        msg.address.digitMode = CdmaSmsAddress.DIGIT_MODE_4BIT_DTMF;
+        msg.address.numberMode = CdmaSmsAddress.NUMBER_MODE_NOT_DATA_NETWORK;
+        msg.address.numberType = CdmaSmsAddress.TON_UNKNOWN;
+        msg.address.numberPlan = CdmaSmsAddress.NUMBERING_PLAN_ISDN_TELEPHONY;
+        msg.subAddress.subaddressType = 0;
+        msg.subAddress.odd = false;
+        return msg;
     }
 
     private static final String CAT_EXTREME_THREAT = "Extreme Threat to Life and Property";
     private static final String CAT_SEVERE_THREAT = "Severe Threat to Life and Property";
     private static final String CAT_AMBER_ALERTS = "AMBER Alerts";
 
+    @Test @SmallTest
     public void testServiceCategoryProgramDataAddCategory() throws Exception {
-        Parcel p = createServiceCategoryProgramDataParcel();
+        CdmaSmsMessage cdmaSmsMessage = createServiceCategoryProgramDataParcel();
         BitwiseOutputStream bos = createBearerDataStream(123, -1, -1);
 
         int categoryNameLength = CAT_EXTREME_THREAT.length();
@@ -625,7 +641,7 @@ public class CdmaSmsCbTest extends AndroidTestCase {
         }
         bos.write(subparamPadBits, 0);
 
-        SmsMessage msg = createMessageFromParcel(p, bos.toByteArray());
+        SmsMessage msg = createMessageFromParcel(cdmaSmsMessage, bos.toByteArray());
         assertNotNull(msg);
         msg.parseSms();
         List<CdmaSmsCbProgramData> programDataList = msg.getSmsCbProgramData();
@@ -640,8 +656,9 @@ public class CdmaSmsCbTest extends AndroidTestCase {
         assertEquals(CdmaSmsCbProgramData.ALERT_OPTION_DEFAULT_ALERT, programData.getAlertOption());
     }
 
+    @Test @SmallTest
     public void testServiceCategoryProgramDataDeleteTwoCategories() throws Exception {
-        Parcel p = createServiceCategoryProgramDataParcel();
+        CdmaSmsMessage cdmaSmsMessage = createServiceCategoryProgramDataParcel();
         BitwiseOutputStream bos = createBearerDataStream(456, -1, -1);
 
         int category1NameLength = CAT_SEVERE_THREAT.length();
@@ -681,7 +698,7 @@ public class CdmaSmsCbTest extends AndroidTestCase {
 
         bos.write(subparamPadBits, 0);
 
-        SmsMessage msg = createMessageFromParcel(p, bos.toByteArray());
+        SmsMessage msg = createMessageFromParcel(cdmaSmsMessage, bos.toByteArray());
         assertNotNull(msg);
         msg.parseSms();
         List<CdmaSmsCbProgramData> programDataList = msg.getSmsCbProgramData();
@@ -721,9 +738,10 @@ public class CdmaSmsCbTest extends AndroidTestCase {
     };
 
     // Test case for CMAS test message received on the Sprint network.
+    @Test @SmallTest
     public void testDecodeRawBearerData() throws Exception {
-        Parcel p = createBroadcastParcel(SmsEnvelope.SERVICE_CATEGORY_CMAS_TEST_MESSAGE);
-        SmsMessage msg = createMessageFromParcel(p, CMAS_TEST_BEARER_DATA);
+        CdmaSmsMessage cdmaSmsMessage = createBroadcastParcel(SmsEnvelope.SERVICE_CATEGORY_CMAS_TEST_MESSAGE);
+        SmsMessage msg = createMessageFromParcel(cdmaSmsMessage, CMAS_TEST_BEARER_DATA);
 
         SmsCbMessage cbMessage = msg.parseBroadcastSms();
         assertNotNull("expected non-null for bearer data", cbMessage);

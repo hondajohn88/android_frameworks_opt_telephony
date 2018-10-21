@@ -19,6 +19,7 @@ package com.android.internal.telephony.cdma;
 import android.content.Context;
 
 import com.android.internal.telephony.CommandException;
+import com.android.internal.telephony.GsmCdmaPhone;
 import com.android.internal.telephony.uicc.UiccCardApplication;
 import com.android.internal.telephony.uicc.IccCardApplicationStatus.AppState;
 import com.android.internal.telephony.MmiCode;
@@ -27,6 +28,7 @@ import com.android.internal.telephony.Phone;
 import android.os.AsyncResult;
 import android.os.Handler;
 import android.os.Message;
+import android.os.ResultReceiver;
 import android.telephony.Rlog;
 
 import java.util.regex.Pattern;
@@ -58,7 +60,7 @@ public final class CdmaMmiCode  extends Handler implements MmiCode {
 
     // Instance Variables
 
-    CDMAPhone mPhone;
+    GsmCdmaPhone mPhone;
     Context mContext;
     UiccCardApplication mUiccApplication;
 
@@ -105,7 +107,7 @@ public final class CdmaMmiCode  extends Handler implements MmiCode {
      */
 
     public static CdmaMmiCode
-    newFromDialString(String dialString, CDMAPhone phone, UiccCardApplication app) {
+    newFromDialString(String dialString, GsmCdmaPhone phone, UiccCardApplication app) {
         Matcher m;
         CdmaMmiCode ret = null;
 
@@ -142,7 +144,7 @@ public final class CdmaMmiCode  extends Handler implements MmiCode {
 
     // Constructor
 
-    CdmaMmiCode (CDMAPhone phone, UiccCardApplication app) {
+    CdmaMmiCode (GsmCdmaPhone phone, UiccCardApplication app) {
         super(phone.getHandler().getLooper());
         mPhone = phone;
         mContext = phone.getContext();
@@ -191,7 +193,7 @@ public final class CdmaMmiCode  extends Handler implements MmiCode {
     /**
      * @return true if the Service Code is PIN/PIN2/PUK/PUK2-related
      */
-    boolean isPinPukCommand() {
+    public boolean isPinPukCommand() {
         return mSc != null && (mSc.equals(SC_PIN) || mSc.equals(SC_PIN2)
                               || mSc.equals(SC_PUK) || mSc.equals(SC_PUK2));
     }
@@ -206,8 +208,13 @@ public final class CdmaMmiCode  extends Handler implements MmiCode {
         return false;
     }
 
+    @Override
+    public String getDialString() {
+        return null;
+    }
+
     /** Process a MMI PUK code */
-    void
+    public void
     processCode() {
         try {
             if (isPinPukCommand()) {
@@ -367,4 +374,8 @@ public final class CdmaMmiCode  extends Handler implements MmiCode {
         mPhone.onMMIDone(this);
     }
 
+    @Override
+    public ResultReceiver getUssdCallbackReceiver() {
+        return null;
+    }
 }

@@ -17,19 +17,26 @@
 package com.android.internal.telephony.sip;
 
 import android.content.Context;
+import android.net.KeepalivePacketData;
+import android.net.LinkProperties;
 import android.os.Handler;
 import android.os.Message;
+import android.service.carrier.CarrierIdentifier;
+import android.telephony.ImsiEncryptionInfo;
+import android.telephony.NetworkScanRequest;
+import android.telephony.data.DataProfile;
 
 import com.android.internal.telephony.BaseCommands;
 import com.android.internal.telephony.CommandsInterface;
 import com.android.internal.telephony.UUSInfo;
 import com.android.internal.telephony.cdma.CdmaSmsBroadcastConfigInfo;
-import com.android.internal.telephony.dataconnection.DataProfile;
 import com.android.internal.telephony.gsm.SmsBroadcastConfigInfo;
+
+import java.util.List;
 
 /**
  * SIP doesn't need CommandsInterface. The class does nothing but made to work
- * with PhoneBase's constructor.
+ * with Phone's constructor.
  */
 class SipCommandInterface extends BaseCommands implements CommandsInterface {
     SipCommandInterface(Context context) {
@@ -41,6 +48,14 @@ class SipCommandInterface extends BaseCommands implements CommandsInterface {
 
     @Override
     public void getIccCardStatus(Message result) {
+    }
+
+    @Override
+    public void getIccSlotsStatus(Message result) {
+    }
+
+    @Override
+    public void setLogicalToPhysicalSlotMapping(int[] physicalSlots, Message result) {
     }
 
     @Override
@@ -256,9 +271,9 @@ class SipCommandInterface extends BaseCommands implements CommandsInterface {
     }
 
     @Override
-    public void setupDataCall(String radioTechnology, String profile,
-            String apn, String user, String password, String authType,
-            String protocol, Message result) {
+    public void setupDataCall(int accessNetworkType, DataProfile dataProfile, boolean isRoaming,
+                              boolean allowRoaming, int reason, LinkProperties linkProperties,
+                              Message result) {
     }
 
     @Override
@@ -329,6 +344,14 @@ class SipCommandInterface extends BaseCommands implements CommandsInterface {
 
     @Override
     public void getAvailableNetworks(Message response) {
+    }
+
+    @Override
+    public void startNetworkScan(NetworkScanRequest nsr, Message response) {
+    }
+
+    @Override
+    public void stopNetworkScan(Message response) {
     }
 
     @Override
@@ -423,10 +446,6 @@ class SipCommandInterface extends BaseCommands implements CommandsInterface {
     }
 
     @Override
-    public void getNeighboringCids(Message response) {
-    }
-
-    @Override
     public void setLocationUpdates(boolean enable, Message response) {
     }
 
@@ -472,7 +491,7 @@ class SipCommandInterface extends BaseCommands implements CommandsInterface {
     }
 
     @Override
-    public void setPhoneType(int phoneType) { //Set by CDMAPhone and GSMPhone constructor
+    public void setPhoneType(int phoneType) { //Set by GsmCdmaPhone
     }
 
     @Override
@@ -541,10 +560,6 @@ class SipCommandInterface extends BaseCommands implements CommandsInterface {
     }
 
     @Override
-    public void requestIsimAuthentication(String nonce, Message response) {
-    }
-
-    @Override
     public void requestIccSimAuthentication(int authContext, String data, String aid, Message response) {
     }
 
@@ -553,24 +568,15 @@ class SipCommandInterface extends BaseCommands implements CommandsInterface {
     }
 
     @Override
-    public void getCellInfoList(Message result) {
+    public void setInitialAttachApn(DataProfile dataProfile, boolean isRoaming, Message result) {
     }
 
     @Override
-    public void setCellInfoListRate(int rateInMillis, Message response) {
+    public void setDataProfile(DataProfile[] dps, boolean isRoaming, Message result) {
     }
 
     @Override
-    public void setInitialAttachApn(String apn, String protocol, int authType, String username,
-            String password, Message result) {
-    }
-
-    @Override
-    public void setDataProfile(DataProfile[] dps, Message result) {
-    }
-
-    @Override
-    public void iccOpenLogicalChannel(String AID, Message response) {
+    public void iccOpenLogicalChannel(String AID, int p2, Message response) {
     }
 
     @Override
@@ -627,4 +633,48 @@ class SipCommandInterface extends BaseCommands implements CommandsInterface {
     public void getModemActivityInfo(Message result) {
     }
 
+    @Override
+    public void setCarrierInfoForImsiEncryption(ImsiEncryptionInfo imsiEncryptionInfo,
+                                                Message result) {
+    }
+
+    @Override
+    public void setAllowedCarriers(List<CarrierIdentifier> carriers, Message result) {
+    }
+
+    @Override
+    public void getAllowedCarriers(Message result) {
+    }
+
+    @Override
+    public void sendDeviceState(int stateType, boolean state, Message result) {
+    }
+
+    @Override
+    public void setUnsolResponseFilter(int filter, Message result){
+    }
+
+    @Override
+    public void setSignalStrengthReportingCriteria(int hysteresisMs, int hysteresisDb,
+            int[] thresholdsDbm, int ran, Message result) {
+    }
+
+    @Override
+    public void setLinkCapacityReportingCriteria(int hysteresisMs, int hysteresisDlKbps,
+            int hysteresisUlKbps, int[] thresholdsDlKbps, int[] thresholdsUlKbps, int ran,
+            Message result) {
+    }
+
+    @Override
+    public void setSimCardPower(int state, Message result) {
+    }
+
+    @Override
+    public void startNattKeepalive(
+            int contextId, KeepalivePacketData packetData, int intervalMillis, Message result) {
+    }
+
+    @Override
+    public void stopNattKeepalive(int sessionHandle, Message result) {
+    }
 }

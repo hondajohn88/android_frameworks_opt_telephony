@@ -22,20 +22,21 @@ import android.os.Handler;
 import android.os.Message;
 import android.os.Registrant;
 import android.os.RegistrantList;
-
 import android.telephony.Rlog;
+import android.telephony.ServiceState;
+import android.telephony.SubscriptionInfo;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
-import android.telephony.SubscriptionInfo;
 
 import com.android.internal.telephony.CommandsInterface;
-import com.android.internal.telephony.uicc.IccCardApplicationStatus.AppState;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.io.UnsupportedEncodingException;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * {@hide}
@@ -46,6 +47,7 @@ public abstract class IccRecords extends Handler implements IccConstants {
 
     // ***** Instance Variables
     protected AtomicBoolean mDestroyed = new AtomicBoolean(false);
+    protected AtomicBoolean mLoaded = new AtomicBoolean(false);
     protected Context mContext;
     protected CommandsInterface mCi;
     protected IccFileHandler mFh;
@@ -53,10 +55,14 @@ public abstract class IccRecords extends Handler implements IccConstants {
     protected TelephonyManager mTelephonyManager;
 
     protected RegistrantList mRecordsLoadedRegistrants = new RegistrantList();
+    protected RegistrantList mLockedRecordsLoadedRegistrants = new RegistrantList();
+    protected RegistrantList mNetworkLockedRecordsLoadedRegistrants = new RegistrantList();
     protected RegistrantList mImsiReadyRegistrants = new RegistrantList();
     protected RegistrantList mRecordsEventsRegistrants = new RegistrantList();
     protected RegistrantList mNewSmsRegistrants = new RegistrantList();
     protected RegistrantList mNetworkSelectionModeAutomaticRegistrants = new RegistrantList();
+    protected RegistrantList mSpnUpdatedRegistrants = new RegistrantList();
+    protected RegistrantList mRecordsOverrideRegistrants = new RegistrantList();
 
     protected int mRecordsToLoad;  // number of pending load requests
 
@@ -64,9 +70,19 @@ public abstract class IccRecords extends Handler implements IccConstants {
 
     // ***** Cached SIM State; cleared on channel close
 
-    protected boolean mRecordsRequested = false; // true if we've made requests for the sim records
+    // SIM is not locked
+    protected static final int LOCKED_RECORDS_REQ_REASON_NONE = 0;
+    // Records requested for PIN or PUK locked SIM
+    protected static final int LOCKED_RECORDS_REQ_REASON_LOCKED = 1;
+    // Records requested for network locked SIM
+    protected static final int LOCKED_RECORDS_REQ_REASON_NETWORK_LOCKED = 2;
 
-    protected String mIccId;
+    protected boolean mRecordsRequested = false; // true if we've made requests for the sim records
+    protected int mLockedRecordsReqReason = LOCKED_RECORDS_REQ_REASON_NONE;
+
+    protected String mIccId;  // Includes only decimals (no hex)
+
+    protected String mFullIccId;  // Includes hex characters in ICCID
     protected String mMsisdn = null;  // My mobile number
     protected String mMsisdnTag = null;
     protected String mNewMsisdn = null;
@@ -86,9 +102,28 @@ public abstract class IccRecords extends Handler implements IccConstants {
 
     protected String mGid1;
     protected String mGid2;
+
+    protected String mPnnHomeName;
+
     protected String mPrefLang;
 
+    protected PlmnActRecord[] mHplmnActRecords;
+    protected PlmnActRecord[] mOplmnActRecords;
+    protected PlmnActRecord[] mPlmnActRecords;
+
+    protected String[] mEhplmns;
+    protected String[] mFplmns;
+
     private final Object mLock = new Object();
+
+    CarrierTestOverride mCarrierTestOverride;
+
+    //Arbitrary offset for the Handler
+    protected static final int HANDLER_ACTION_BASE = 0x12E500;
+    protected static final int HANDLER_ACTION_NONE = HANDLER_ACTION_BASE + 0;
+    protected static final int HANDLER_ACTION_SEND_RESPONSE = HANDLER_ACTION_BASE + 1;
+    protected static AtomicInteger sNextRequestId = new AtomicInteger(1);
+    protected final HashMap<Integer, Message> mPendingResponses = new HashMap<>();
 
     // ***** Constants
 
@@ -101,12 +136,12 @@ public abstract class IccRecords extends Handler implements IccConstants {
     public static final int SPN_RULE_SHOW_PLMN = 0x02;
 
     // ***** Event Constants
-    protected static final int EVENT_SET_MSISDN_DONE = 30;
     public static final int EVENT_MWI = 0; // Message Waiting indication
     public static final int EVENT_CFI = 1; // Call Forwarding indication
     public static final int EVENT_SPN = 2; // Service Provider Name
 
     public static final int EVENT_GET_ICC_RECORD_DONE = 100;
+    public static final int EVENT_REFRESH = 31; // ICC refresh occurred
     protected static final int EVENT_APP_READY = 1;
     private static final int EVENT_AKA_AUTHENTICATE_DONE          = 90;
 
@@ -114,35 +149,39 @@ public abstract class IccRecords extends Handler implements IccConstants {
     public static final int CALL_FORWARDING_STATUS_ENABLED = 1;
     public static final int CALL_FORWARDING_STATUS_UNKNOWN = -1;
 
+    public static final int DEFAULT_VOICE_MESSAGE_COUNT = -2;
+    public static final int UNKNOWN_VOICE_MESSAGE_COUNT = -1;
+
     @Override
     public String toString() {
-        String iccIdToPrint = SubscriptionInfo.givePrintableIccid(mIccId);
+        String iccIdToPrint = SubscriptionInfo.givePrintableIccid(mFullIccId);
         return "mDestroyed=" + mDestroyed
                 + " mContext=" + mContext
                 + " mCi=" + mCi
                 + " mFh=" + mFh
                 + " mParentApp=" + mParentApp
-                + " recordsLoadedRegistrants=" + mRecordsLoadedRegistrants
-                + " mImsiReadyRegistrants=" + mImsiReadyRegistrants
-                + " mRecordsEventsRegistrants=" + mRecordsEventsRegistrants
-                + " mNewSmsRegistrants=" + mNewSmsRegistrants
-                + " mNetworkSelectionModeAutomaticRegistrants="
-                        + mNetworkSelectionModeAutomaticRegistrants
                 + " recordsToLoad=" + mRecordsToLoad
                 + " adnCache=" + mAdnCache
                 + " recordsRequested=" + mRecordsRequested
+                + " lockedRecordsReqReason=" + mLockedRecordsReqReason
                 + " iccid=" + iccIdToPrint
+                + (mCarrierTestOverride.isInTestMode() ? "mFakeIccid="
+                + mCarrierTestOverride.getFakeIccid() : "")
                 + " msisdnTag=" + mMsisdnTag
-                + " voiceMailNum=" + mVoiceMailNum
+                + " voiceMailNum=" + Rlog.pii(VDBG, mVoiceMailNum)
                 + " voiceMailTag=" + mVoiceMailTag
-                + " newVoiceMailNum=" + mNewVoiceMailNum
+                + " voiceMailNum=" + Rlog.pii(VDBG, mNewVoiceMailNum)
                 + " newVoiceMailTag=" + mNewVoiceMailTag
                 + " isVoiceMailFixed=" + mIsVoiceMailFixed
-                + (VDBG ? (" mImsi=" + mImsi) : "")
+                + " mImsi=" + ((mImsi != null) ?
+                mImsi.substring(0, 6) + Rlog.pii(VDBG, mImsi.substring(6)) : "null")
+                + (mCarrierTestOverride.isInTestMode() ? " mFakeImsi="
+                + mCarrierTestOverride.getFakeIMSI() : "")
                 + " mncLength=" + mMncLength
                 + " mailboxIndex=" + mMailboxIndex
-                + " spn=" + mSpn;
-
+                + " spn=" + mSpn
+                + (mCarrierTestOverride.isInTestMode() ? " mFakeSpn="
+                + mCarrierTestOverride.getFakeSpn() : "");
     }
 
     /**
@@ -169,6 +208,18 @@ public abstract class IccRecords extends Handler implements IccConstants {
         mParentApp = app;
         mTelephonyManager = (TelephonyManager) mContext.getSystemService(
                 Context.TELEPHONY_SERVICE);
+
+        mCarrierTestOverride = new CarrierTestOverride();
+        mCi.registerForIccRefresh(this, EVENT_REFRESH, null);
+    }
+
+    // Override IccRecords for testing
+    public void setCarrierTestOverride(String mccmnc, String imsi, String iccid, String gid1,
+            String gid2, String pnn, String spn)  {
+        mCarrierTestOverride.override(mccmnc, imsi, iccid, gid1, gid2, pnn, spn);
+        mTelephonyManager.setSimOperatorNameForPhone(mParentApp.getPhoneId(), spn);
+        mTelephonyManager.setSimOperatorNumericForPhone(mParentApp.getPhoneId(), mccmnc);
+        mRecordsOverrideRegistrants.notifyRegistrants();
     }
 
     /**
@@ -176,10 +227,23 @@ public abstract class IccRecords extends Handler implements IccConstants {
      */
     public void dispose() {
         mDestroyed.set(true);
+
+        // It is possible that there is another thread waiting for the response
+        // to requestIccSimAuthentication() in getIccSimChallengeResponse().
+        auth_rsp = null;
+        synchronized (mLock) {
+            mLock.notifyAll();
+        }
+
+        mCi.unregisterForIccRefresh(this);
         mParentApp = null;
         mFh = null;
         mCi = null;
         mContext = null;
+        if (mAdnCache != null) {
+            mAdnCache.reset();
+        }
+        mLoaded.set(false);
     }
 
     public abstract void onReady();
@@ -189,8 +253,48 @@ public abstract class IccRecords extends Handler implements IccConstants {
         return mAdnCache;
     }
 
+    /**
+     * Adds a message to the pending requests list by generating a unique
+     * (integer) hash key and returning it. The message should never be null.
+     */
+    public int storePendingResponseMessage(Message msg) {
+        int key = sNextRequestId.getAndIncrement();
+        synchronized (mPendingResponses) {
+            mPendingResponses.put(key, msg);
+        }
+        return key;
+    }
+
+    /**
+     * Returns the pending request, if any or null
+     */
+    public Message retrievePendingResponseMessage(Integer key) {
+        Message m;
+        synchronized (mPendingResponses) {
+            return mPendingResponses.remove(key);
+        }
+    }
+
+    /**
+     * Returns the ICC ID stripped at the first hex character. Some SIMs have ICC IDs
+     * containing hex digits; {@link #getFullIccId()} should be used to get the full ID including
+     * hex digits.
+     * @return ICC ID without hex digits
+     */
     public String getIccId() {
-        return mIccId;
+        if (mCarrierTestOverride.isInTestMode() && mCarrierTestOverride.getFakeIccid() != null) {
+            return mCarrierTestOverride.getFakeIccid();
+        } else {
+            return mIccId;
+        }
+    }
+
+    /**
+     * Returns the full ICC ID including hex digits.
+     * @return full ICC ID including hex digits
+     */
+    public String getFullIccId() {
+        return mFullIccId;
     }
 
     public void registerForRecordsLoaded(Handler h, int what, Object obj) {
@@ -201,12 +305,76 @@ public abstract class IccRecords extends Handler implements IccConstants {
         Registrant r = new Registrant(h, what, obj);
         mRecordsLoadedRegistrants.add(r);
 
-        if (mRecordsToLoad == 0 && mRecordsRequested == true) {
+        if (getRecordsLoaded()) {
             r.notifyRegistrant(new AsyncResult(null, null, null));
         }
     }
+
     public void unregisterForRecordsLoaded(Handler h) {
         mRecordsLoadedRegistrants.remove(h);
+    }
+
+    public void unregisterForRecordsOverride(Handler h) {
+        mRecordsOverrideRegistrants.remove(h);
+    }
+
+    public void registerForRecordsOverride(Handler h, int what, Object obj) {
+        if (mDestroyed.get()) {
+            return;
+        }
+
+        Registrant r = new Registrant(h, what, obj);
+        mRecordsOverrideRegistrants.add(r);
+
+        if (getRecordsLoaded()) {
+            r.notifyRegistrant(new AsyncResult(null, null, null));
+        }
+    }
+
+    /**
+     * Register to be notified when records are loaded for a PIN or PUK locked SIM
+     */
+    public void registerForLockedRecordsLoaded(Handler h, int what, Object obj) {
+        if (mDestroyed.get()) {
+            return;
+        }
+
+        Registrant r = new Registrant(h, what, obj);
+        mLockedRecordsLoadedRegistrants.add(r);
+
+        if (getLockedRecordsLoaded()) {
+            r.notifyRegistrant(new AsyncResult(null, null, null));
+        }
+    }
+
+    /**
+     * Unregister corresponding to registerForLockedRecordsLoaded()
+     */
+    public void unregisterForLockedRecordsLoaded(Handler h) {
+        mLockedRecordsLoadedRegistrants.remove(h);
+    }
+
+    /**
+     * Register to be notified when records are loaded for a network locked SIM
+     */
+    public void registerForNetworkLockedRecordsLoaded(Handler h, int what, Object obj) {
+        if (mDestroyed.get()) {
+            return;
+        }
+
+        Registrant r = new Registrant(h, what, obj);
+        mNetworkLockedRecordsLoadedRegistrants.add(r);
+
+        if (getNetworkLockedRecordsLoaded()) {
+            r.notifyRegistrant(new AsyncResult(null, null, null));
+        }
+    }
+
+    /**
+     * Unregister corresponding to registerForLockedRecordsLoaded()
+     */
+    public void unregisterForNetworkLockedRecordsLoaded(Handler h) {
+        mNetworkLockedRecordsLoadedRegistrants.remove(h);
     }
 
     public void registerForImsiReady(Handler h, int what, Object obj) {
@@ -217,12 +385,28 @@ public abstract class IccRecords extends Handler implements IccConstants {
         Registrant r = new Registrant(h, what, obj);
         mImsiReadyRegistrants.add(r);
 
-        if (mImsi != null) {
+        if (getIMSI() != null) {
             r.notifyRegistrant(new AsyncResult(null, null, null));
         }
     }
     public void unregisterForImsiReady(Handler h) {
         mImsiReadyRegistrants.remove(h);
+    }
+
+    public void registerForSpnUpdate(Handler h, int what, Object obj) {
+        if (mDestroyed.get()) {
+            return;
+        }
+
+        Registrant r = new Registrant(h, what, obj);
+        mSpnUpdatedRegistrants.add(r);
+
+        if (!TextUtils.isEmpty(mSpn)) {
+            r.notifyRegistrant(new AsyncResult(null, null, null));
+        }
+    }
+    public void unregisterForSpnUpdate(Handler h) {
+        mSpnUpdatedRegistrants.remove(h);
     }
 
     public void registerForRecordsEvents(Handler h, int what, Object obj) {
@@ -263,7 +447,11 @@ public abstract class IccRecords extends Handler implements IccConstants {
      * @return null if SIM is not yet ready or unavailable
      */
     public String getIMSI() {
-        return null;
+        if (mCarrierTestOverride.isInTestMode() && mCarrierTestOverride.getFakeIMSI() != null) {
+            return mCarrierTestOverride.getFakeIMSI();
+        } else {
+            return mImsi;
+        }
     }
 
     /**
@@ -294,7 +482,11 @@ public abstract class IccRecords extends Handler implements IccConstants {
      * @return null if SIM is not yet ready
      */
     public String getGid1() {
-        return null;
+        if (mCarrierTestOverride.isInTestMode() && mCarrierTestOverride.getFakeGid1() != null) {
+            return mCarrierTestOverride.getFakeGid1();
+        } else {
+            return mGid1;
+        }
     }
 
     /**
@@ -302,37 +494,33 @@ public abstract class IccRecords extends Handler implements IccConstants {
      * @return null if SIM is not yet ready
      */
     public String getGid2() {
-        return null;
+        if (mCarrierTestOverride.isInTestMode() && mCarrierTestOverride.getFakeGid2() != null) {
+            return mCarrierTestOverride.getFakeGid2();
+        } else {
+            return mGid2;
+        }
     }
 
     /**
-     * Set subscriber number to SIM record
-     *
-     * The subscriber number is stored in EF_MSISDN (TS 51.011)
-     *
-     * When the operation is complete, onComplete will be sent to its handler
-     *
-     * @param alphaTag alpha-tagging of the dailing nubmer (up to 10 characters)
-     * @param number dailing nubmer (up to 20 digits)
-     *        if the number starts with '+', then set to international TOA
-     * @param onComplete
-     *        onComplete.obj will be an AsyncResult
-     *        ((AsyncResult)onComplete.obj).exception == null on success
-     *        ((AsyncResult)onComplete.obj).exception != null on fail
+     * Get the PLMN network name on a SIM.
+     * @return null if SIM is not yet ready
      */
+    public String getPnnHomeName() {
+        if (mCarrierTestOverride.isInTestMode()
+                && mCarrierTestOverride.getFakePnnHomeName() != null) {
+            return mCarrierTestOverride.getFakePnnHomeName();
+        } else {
+            return mPnnHomeName;
+        }
+    }
+
     public void setMsisdnNumber(String alphaTag, String number,
             Message onComplete) {
-
-        mMsisdn = number;
-        mMsisdnTag = alphaTag;
-
-        if (DBG) log("Set MSISDN: " + mMsisdnTag +" " + mMsisdn);
-
-
-        AdnRecord adn = new AdnRecord(mMsisdnTag, mMsisdn);
-
-        new AdnRecordLoader(mFh).updateEF(adn, EF_MSISDN, EF_EXT1, 1, null,
-                obtainMessage(EVENT_SET_MSISDN_DONE, onComplete));
+        loge("setMsisdn() should not be invoked on base IccRecords");
+        // synthesize a "File Not Found" exception and return it
+        AsyncResult.forMessage(onComplete).exception =
+            (new IccIoResult(0x6A, 0x82, (byte[]) null)).getException();
+        onComplete.sendToTarget();
     }
 
     public String getMsisdnAlphaTag() {
@@ -349,33 +537,38 @@ public abstract class IccRecords extends Handler implements IccConstants {
      * @return null if SIM is not yet ready or no RUIM entry
      */
     public String getServiceProviderName() {
+        if (mCarrierTestOverride.isInTestMode() && mCarrierTestOverride.getFakeSpn() != null) {
+            return mCarrierTestOverride.getFakeSpn();
+        }
         String providerName = mSpn;
 
         // Check for null pointers, mParentApp can be null after dispose,
         // which did occur after removing a SIM.
         UiccCardApplication parentApp = mParentApp;
         if (parentApp != null) {
-            UiccCard card = parentApp.getUiccCard();
-            if (card != null) {
-                String brandOverride = card.getOperatorBrandOverride();
+            UiccProfile profile = parentApp.getUiccProfile();
+            if (profile != null) {
+                String brandOverride = profile.getOperatorBrandOverride();
                 if (brandOverride != null) {
-                    log("getServiceProviderName: override");
+                    log("getServiceProviderName: override, providerName=" + providerName);
                     providerName = brandOverride;
                 } else {
-                    log("getServiceProviderName: no brandOverride");
+                    log("getServiceProviderName: no brandOverride, providerName=" + providerName);
                 }
             } else {
-                log("getServiceProviderName: card is null");
+                log("getServiceProviderName: card is null, providerName=" + providerName);
             }
         } else {
-            log("getServiceProviderName: mParentApp is null");
+            log("getServiceProviderName: mParentApp is null, providerName=" + providerName);
         }
-        log("getServiceProviderName: providerName=" + providerName);
         return providerName;
     }
 
     protected void setServiceProviderName(String spn) {
-        mSpn = spn;
+        if (!TextUtils.equals(mSpn, spn)) {
+            mSpnUpdatedRegistrants.notifyRegistrants();
+            mSpn = spn;
+        }
     }
 
     /**
@@ -419,7 +612,7 @@ public abstract class IccRecords extends Handler implements IccConstants {
     public abstract void setVoiceMessageWaiting(int line, int countWaiting);
 
     /**
-     * Called by GsmPhone to update VoiceMail count
+     * Called by GsmCdmaPhone to update VoiceMail count
      */
     public abstract int getVoiceMessageCount();
 
@@ -430,26 +623,18 @@ public abstract class IccRecords extends Handler implements IccConstants {
      */
     public abstract void onRefresh(boolean fileChanged, int[] fileList);
 
-    /**
-     * Called by subclasses (SimRecords and RuimRecords) whenever
-     * IccRefreshResponse.REFRESH_RESULT_INIT event received
-     */
-    protected void onIccRefreshInit() {
-        mAdnCache.reset();
-        UiccCardApplication parentApp = mParentApp;
-        if ((parentApp != null) &&
-                (parentApp.getState() == AppState.APPSTATE_READY)) {
-            // This will cause files to be reread
-            sendMessage(obtainMessage(EVENT_APP_READY));
-        }
+    public boolean getRecordsLoaded() {
+        return mRecordsToLoad == 0 && mRecordsRequested;
     }
 
-    public boolean getRecordsLoaded() {
-        if (mRecordsToLoad == 0 && mRecordsRequested == true) {
-            return true;
-        } else {
-            return false;
-        }
+    protected boolean getLockedRecordsLoaded() {
+        return mRecordsToLoad == 0
+                && mLockedRecordsReqReason == LOCKED_RECORDS_REQ_REASON_LOCKED;
+    }
+
+    protected boolean getNetworkLockedRecordsLoaded() {
+        return mRecordsToLoad == 0
+                && mLockedRecordsReqReason == LOCKED_RECORDS_REQ_REASON_NETWORK_LOCKED;
     }
 
     //***** Overridden from Handler
@@ -475,6 +660,16 @@ public abstract class IccRecords extends Handler implements IccConstants {
                 } finally {
                     // Count up record load responses even if they are fails
                     onRecordLoaded();
+                }
+                break;
+
+            case EVENT_REFRESH:
+                ar = (AsyncResult)msg.obj;
+                if (DBG) log("Card REFRESH occurred: ");
+                if (ar.exception == null) {
+                    handleRefresh((IccRefreshResponse)ar.result);
+                } else {
+                    loge("Icc refresh Exception: " + ar.exception);
                 }
                 break;
 
@@ -546,19 +741,51 @@ public abstract class IccRecords extends Handler implements IccConstants {
         return null;
     }
 
+    protected abstract void handleFileUpdate(int efid);
+
+    protected void handleRefresh(IccRefreshResponse refreshResponse){
+        if (refreshResponse == null) {
+            if (DBG) log("handleRefresh received without input");
+            return;
+        }
+
+        if (!TextUtils.isEmpty(refreshResponse.aid) &&
+                !refreshResponse.aid.equals(mParentApp.getAid())) {
+            // This is for different app. Ignore.
+            return;
+        }
+
+        switch (refreshResponse.refreshResult) {
+            case IccRefreshResponse.REFRESH_RESULT_FILE_UPDATE:
+                if (DBG) log("handleRefresh with SIM_FILE_UPDATED");
+                handleFileUpdate(refreshResponse.efId);
+                break;
+            default:
+                // unknown refresh operation
+                if (DBG) log("handleRefresh with unknown operation");
+                break;
+        }
+    }
+
     protected abstract void onRecordLoaded();
 
     protected abstract void onAllRecordsLoaded();
 
     /**
      * Returns the SpnDisplayRule based on settings on the SIM and the
-     * specified plmn (currently-registered PLMN).  See TS 22.101 Annex A
-     * and TS 51.011 10.3.11 for details.
+     * current service state. See TS 22.101 Annex A and TS 51.011 10.3.11
+     * for details.
      *
      * If the SPN is not found on the SIM, the rule is always PLMN_ONLY.
      * Generally used for GSM/UMTS and the like SIMs.
+     *
+     * @param serviceState Service state
+     * @return the display rule
+     *
+     * @see #SPN_RULE_SHOW_SPN
+     * @see #SPN_RULE_SHOW_PLMN
      */
-    public abstract int getDisplayRule(String plmn);
+    public abstract int getDisplayRule(ServiceState serviceState);
 
     /**
      * Return true if "Restriction of menu options for manual PLMN selection"
@@ -596,6 +823,15 @@ public abstract class IccRecords extends Handler implements IccConstants {
      * @param number to which CFU is enabled
      */
     public void setVoiceCallForwardingFlag(int line, boolean enable, String number) {
+    }
+
+    /**
+     * Indicates wether the ICC records have been loaded or not
+     *
+     * @return true if the records have been loaded, false otherwise.
+     */
+    public boolean isLoaded() {
+        return mLoaded.get();
     }
 
     /**
@@ -680,6 +916,11 @@ public abstract class IccRecords extends Handler implements IccConstants {
             return null;
         }
 
+        if (auth_rsp == null) {
+            loge("getIccSimChallengeResponse: No authentication response");
+            return null;
+        }
+
         if (DBG) log("getIccSimChallengeResponse: return auth_rsp");
 
         return android.util.Base64.encodeToString(auth_rsp.payload, android.util.Base64.NO_WRAP);
@@ -695,6 +936,18 @@ public abstract class IccRecords extends Handler implements IccConstants {
         for (int i = 0; i < mRecordsLoadedRegistrants.size(); i++) {
             pw.println("  recordsLoadedRegistrants[" + i + "]="
                     + ((Registrant)mRecordsLoadedRegistrants.get(i)).getHandler());
+        }
+        pw.println(" mLockedRecordsLoadedRegistrants: size="
+                + mLockedRecordsLoadedRegistrants.size());
+        for (int i = 0; i < mLockedRecordsLoadedRegistrants.size(); i++) {
+            pw.println("  mLockedRecordsLoadedRegistrants[" + i + "]="
+                    + ((Registrant) mLockedRecordsLoadedRegistrants.get(i)).getHandler());
+        }
+        pw.println(" mNetworkLockedRecordsLoadedRegistrants: size="
+                + mNetworkLockedRecordsLoadedRegistrants.size());
+        for (int i = 0; i < mNetworkLockedRecordsLoadedRegistrants.size(); i++) {
+            pw.println("  mLockedRecordsLoadedRegistrants[" + i + "]="
+                    + ((Registrant) mNetworkLockedRecordsLoadedRegistrants.get(i)).getHandler());
         }
         pw.println(" mImsiReadyRegistrants: size=" + mImsiReadyRegistrants.size());
         for (int i = 0; i < mImsiReadyRegistrants.size(); i++) {
@@ -718,26 +971,30 @@ public abstract class IccRecords extends Handler implements IccConstants {
                     + ((Registrant)mNetworkSelectionModeAutomaticRegistrants.get(i)).getHandler());
         }
         pw.println(" mRecordsRequested=" + mRecordsRequested);
+        pw.println(" mLockedRecordsReqReason=" + mLockedRecordsReqReason);
         pw.println(" mRecordsToLoad=" + mRecordsToLoad);
         pw.println(" mRdnCache=" + mAdnCache);
-        String iccIdToPrint = SubscriptionInfo.givePrintableIccid(mIccId);
 
+        String iccIdToPrint = SubscriptionInfo.givePrintableIccid(mFullIccId);
         pw.println(" iccid=" + iccIdToPrint);
-        if (TextUtils.isEmpty(mMsisdn)) {
-            pw.println(" mMsisdn=null");
-        } else {
-            pw.println(" mMsisdn=" + (VDBG ? mMsisdn : "XXX"));
-        }
+        pw.println(" mMsisdn=" + Rlog.pii(VDBG, mMsisdn));
         pw.println(" mMsisdnTag=" + mMsisdnTag);
-        pw.println(" mVoiceMailNum=" + mVoiceMailNum);
+        pw.println(" mVoiceMailNum=" + Rlog.pii(VDBG, mVoiceMailNum));
         pw.println(" mVoiceMailTag=" + mVoiceMailTag);
-        pw.println(" mNewVoiceMailNum=" + mNewVoiceMailNum);
+        pw.println(" mNewVoiceMailNum=" + Rlog.pii(VDBG, mNewVoiceMailNum));
         pw.println(" mNewVoiceMailTag=" + mNewVoiceMailTag);
         pw.println(" mIsVoiceMailFixed=" + mIsVoiceMailFixed);
-        if (VDBG) pw.println(" mImsi=" + mImsi);
+        pw.println(" mImsi=" + ((mImsi != null) ?
+                mImsi.substring(0, 6) + Rlog.pii(VDBG, mImsi.substring(6)) : "null"));
+        if (mCarrierTestOverride.isInTestMode()) {
+            pw.println(" mFakeImsi=" + mCarrierTestOverride.getFakeIMSI());
+        }
         pw.println(" mMncLength=" + mMncLength);
         pw.println(" mMailboxIndex=" + mMailboxIndex);
         pw.println(" mSpn=" + mSpn);
+        if (mCarrierTestOverride.isInTestMode()) {
+            pw.println(" mFakeSpn=" + mCarrierTestOverride.getFakeSpn());
+        }
         pw.flush();
     }
 }

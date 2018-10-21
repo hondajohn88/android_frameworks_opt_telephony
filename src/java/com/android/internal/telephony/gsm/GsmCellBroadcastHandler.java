@@ -19,16 +19,14 @@ package com.android.internal.telephony.gsm;
 import android.content.Context;
 import android.os.AsyncResult;
 import android.os.Message;
-import android.os.SystemProperties;
 import android.telephony.CellLocation;
 import android.telephony.SmsCbLocation;
 import android.telephony.SmsCbMessage;
-import android.telephony.gsm.GsmCellLocation;
 import android.telephony.TelephonyManager;
+import android.telephony.gsm.GsmCellLocation;
 
 import com.android.internal.telephony.CellBroadcastHandler;
-import com.android.internal.telephony.PhoneBase;
-import com.android.internal.telephony.TelephonyProperties;
+import com.android.internal.telephony.Phone;
 
 import java.util.HashMap;
 import java.util.Iterator;
@@ -43,7 +41,7 @@ public class GsmCellBroadcastHandler extends CellBroadcastHandler {
     private final HashMap<SmsCbConcatInfo, byte[][]> mSmsCbPageMap =
             new HashMap<SmsCbConcatInfo, byte[][]>(4);
 
-    protected GsmCellBroadcastHandler(Context context, PhoneBase phone) {
+    protected GsmCellBroadcastHandler(Context context, Phone phone) {
         super("GsmCellBroadcastHandler", context, phone);
         phone.mCi.setOnNewGsmBroadcastSms(getHandler(), EVENT_NEW_SMS_MESSAGE, null);
     }
@@ -60,7 +58,7 @@ public class GsmCellBroadcastHandler extends CellBroadcastHandler {
      * @return the new handler
      */
     public static GsmCellBroadcastHandler makeGsmCellBroadcastHandler(Context context,
-            PhoneBase phone) {
+            Phone phone) {
         GsmCellBroadcastHandler handler = new GsmCellBroadcastHandler(context, phone);
         handler.start();
         return handler;
@@ -80,6 +78,7 @@ public class GsmCellBroadcastHandler extends CellBroadcastHandler {
                 handleBroadcastSms(cbMessage);
                 return true;
             }
+            if (VDBG) log("Not handled GSM broadcasts.");
         }
         return super.handleSmsMessage(message);
     }
@@ -108,6 +107,7 @@ public class GsmCellBroadcastHandler extends CellBroadcastHandler {
             }
 
             SmsCbHeader header = new SmsCbHeader(receivedPdu);
+            if (VDBG) log("header=" + header);
             String plmn = TelephonyManager.from(mContext).getNetworkOperatorForPhone(
                     mPhone.getPhoneId());
             int lac = -1;
@@ -156,12 +156,14 @@ public class GsmCellBroadcastHandler extends CellBroadcastHandler {
                     mSmsCbPageMap.put(concatInfo, pdus);
                 }
 
+                if (VDBG) log("pdus size=" + pdus.length);
                 // Page parameter is one-based
                 pdus[header.getPageIndex() - 1] = receivedPdu;
 
                 for (byte[] pdu : pdus) {
                     if (pdu == null) {
                         // Still missing pages, exit
+                        log("still missing pdu");
                         return null;
                     }
                 }
@@ -187,7 +189,7 @@ public class GsmCellBroadcastHandler extends CellBroadcastHandler {
                 }
             }
 
-            return GsmSmsCbMessage.createSmsCbMessage(header, location, pdus);
+            return GsmSmsCbMessage.createSmsCbMessage(mContext, header, location, pdus);
 
         } catch (RuntimeException e) {
             loge("Error in decoding SMS CB pdu", e);
